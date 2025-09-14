@@ -186,7 +186,10 @@ class LocationServer {
     // Broadcast to all other connected clients
     this.broadcastToOthers(data.name, {
       type: 'user_location',
-      data: userData
+      data: {
+        ...userData,
+        connected: true  // User is connected since they're sending location updates
+      }
     });
   }
 
@@ -305,7 +308,10 @@ class LocationServer {
     } catch (error) {
       console.error('Error sending users list:', error);
       // Fallback to in-memory users only
-      const usersList = Array.from(this.users.values());
+      const usersList = Array.from(this.users.values()).map(user => ({
+        ...user,
+        connected: true  // All in-memory users are connected
+      }));
       this.sendMessage(ws, {
         type: 'users_list',
         data: usersList

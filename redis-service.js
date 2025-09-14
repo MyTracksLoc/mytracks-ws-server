@@ -115,8 +115,7 @@ class RedisService {
       // Store user metadata
       await this.client.hSet(userKey, {
         name: locationData.name,
-        lastUpdate: locationData.lastUpdate || new Date().toISOString(),
-        lastSeen: new Date().toISOString()
+        lastUpdate: locationData.lastUpdate || new Date().toISOString()
       });
 
       // Set TTL for user metadata
@@ -203,13 +202,14 @@ class RedisService {
     }
 
     try {
-      const pattern = `${this.config.keyPrefix}user:*`;
-      const userKeys = await this.client.keys(pattern);
+      // Look for location keys instead of user keys to avoid duplicates
+      const pattern = `${this.config.keyPrefix}locations:*`;
+      const locationKeys = await this.client.keys(pattern);
       
       const users = [];
       
-      for (const userKey of userKeys) {
-        const username = userKey.replace(`${this.config.keyPrefix}user:`, '');
+      for (const locationKey of locationKeys) {
+        const username = locationKey.replace(`${this.config.keyPrefix}locations:`, '');
         const userData = await this.getLatestUserLocation(username);
         
         if (userData) {
