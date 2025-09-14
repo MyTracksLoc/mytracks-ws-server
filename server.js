@@ -2,7 +2,7 @@ const uWS = require('uWebSockets.js');
 const { v4: uuidv4, validate: isValidUUID } = require('uuid');
 
 class LocationServer {
-  constructor(port = 8080) {
+  constructor(port = 8083) {
     this.port = port;
     this.users = new Map(); // userId -> user data
     this.connections = new Map(); // userId -> websocket connection
@@ -316,15 +316,27 @@ class LocationServer {
   }
 
   start() {
-    this.app.listen(this.port, (token) => {
+    console.log(`🔄 Attempting to start server on port ${this.port}...`);
+    console.log(`🖥️  Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`📍 Binding to: 0.0.0.0:${this.port}`);
+    
+    this.app.listen('0.0.0.0', this.port, (token) => {
       if (token) {
-        console.log(`🚀 Live Location WebSocket Server started on port ${this.port}`);
+        console.log(`🚀 Live Location WebSocket Server started successfully!`);
         console.log(`📊 Server ID: ${this.serverId}`);
+        console.log(`🌐 Address: 0.0.0.0:${this.port}`);
         console.log(`👥 Max users: ${this.config.maxUsers}`);
         console.log(`⏱️  Rate limit: ${this.config.locationUpdateInterval}ms`);
         console.log(`🔗 Health check: http://localhost:${this.port}/health`);
+        console.log(`📝 WebSocket URL: ws://localhost:${this.port}`);
       } else {
-        console.error('❌ Failed to listen on port', this.port);
+        console.error(`❌ Failed to listen on port ${this.port}`);
+        console.error(`🔍 Possible causes:`);
+        console.error(`   - Port ${this.port} is already in use`);
+        console.error(`   - Permission denied (ports < 1024 require root)`);
+        console.error(`   - Invalid port number`);
+        console.error(`   - Network interface not available`);
+        console.error(`🛠️  Try: lsof -i :${this.port} (to check what's using the port)`);
         process.exit(1);
       }
     });
