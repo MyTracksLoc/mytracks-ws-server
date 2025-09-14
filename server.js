@@ -44,26 +44,13 @@ class LocationServer {
     const connected = await this.redis.connect();
     if (connected) {
       console.log('✅ Redis initialized successfully');
-      // Load existing users from Redis on startup
-      await this.loadUsersFromRedis();
+      // Note: We don't load users from Redis on startup to avoid treating
+      // historical users as connected. Users will be loaded on-demand when needed.
     } else {
       console.warn('⚠️ Redis connection failed, running in memory-only mode');
     }
   }
 
-  async loadUsersFromRedis() {
-    try {
-      const users = await this.redis.getAllUsersWithLocations();
-      console.log(`📊 Loaded ${users.length} users from Redis`);
-      
-      // Add users to in-memory cache (but don't set connections)
-      users.forEach(user => {
-        this.users.set(user.name, user);
-      });
-    } catch (error) {
-      console.error('Error loading users from Redis:', error);
-    }
-  }
 
   setupRoutes() {
     this.app.ws('/*', {
