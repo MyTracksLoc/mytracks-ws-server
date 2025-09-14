@@ -19,7 +19,8 @@
   "license": "MIT",
   "dependencies": {
     "uuid": "^9.0.0",
-    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.52.0"
+    "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.52.0",
+    "redis": "^4.6.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.0",

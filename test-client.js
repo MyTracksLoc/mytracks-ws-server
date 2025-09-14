@@ -1,10 +1,8 @@
 const WebSocket = require('ws');
-const { v4: uuidv4 } = require('uuid');
 
 class TestClient {
   constructor(url = 'ws://localhost:8083', userName = 'Test User') {
     this.url = url;
-    this.userId = uuidv4();
     this.userName = userName;
     this.ws = null;
     this.locationUpdateInterval = null;
@@ -17,7 +15,7 @@ class TestClient {
   }
 
   connect() {
-    console.log(`🔗 Connecting to ${this.url} as ${this.userName} (${this.userId})`);
+    console.log(`🔗 Connecting to ${this.url} as ${this.userName}`);
     
     this.ws = new WebSocket(this.url);
 
@@ -54,7 +52,7 @@ class TestClient {
       case 'users_list':
         console.log(`👥 Current users (${message.data.length}):`);
         message.data.forEach(user => {
-          console.log(`   - ${user.name} (${user.id.substr(0, 8)}...) at [${user.latitude}, ${user.longitude}]`);
+          console.log(`   - ${user.name} at [${user.latitude}, ${user.longitude}]`);
         });
         break;
       
@@ -64,7 +62,7 @@ class TestClient {
         break;
       
       case 'user_disconnected':
-        console.log(`👋 ${message.data.name || message.data.id} disconnected`);
+        console.log(`👋 ${message.data.name} disconnected`);
         break;
       
       case 'error':
@@ -98,7 +96,6 @@ class TestClient {
       const message = {
         type: 'location_update',
         data: {
-          id: this.userId,
           name: this.userName,
           latitude: this.location.latitude,
           longitude: this.location.longitude,
@@ -126,7 +123,7 @@ class TestClient {
       this.ws.send(JSON.stringify({
         type: 'user_disconnect',
         data: {
-          id: this.userId
+          name: this.userName
         }
       }));
 

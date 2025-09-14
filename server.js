@@ -1,13 +1,16 @@
 const uWS = require('uWebSockets.js');
-const { v4: uuidv4, validate: isValidUUID } = require('uuid');
+const RedisService = require('./redis-service');
 
 class LocationServer {
   constructor(port = 8083) {
     this.port = port;
-    this.users = new Map(); // userId -> user data
-    this.connections = new Map(); // userId -> websocket connection
-    this.userRateLimit = new Map(); // userId -> last update timestamp
+    this.users = new Map(); // username -> user data (in-memory cache)
+    this.connections = new Map(); // username -> websocket connection
+    this.userRateLimit = new Map(); // username -> last update timestamp
     this.serverId = `server-${Math.random().toString(36).substr(2, 9)}`;
+    
+    // Initialize Redis service
+    this.redis = new RedisService();
     
     // Configuration
     this.config = {
@@ -25,6 +28,41 @@ class LocationServer {
 
     this.setupRoutes();
     this.startCleanupTimer();
+    this.initializeRedis();
+  }
+
+  async initializeRedis() {
+    console.log('🔄 Initializing Redis connection...');
+    
+    // Set default Redis connection for Docker if not specified
+    if (!process.env.REDIS_HOST) {
+      process.env.REDIS_HOST = 'localhost';
+      process.env.REDIS_PORT = '6384';
+      console.log('📡 Using default Redis connection: localhost:6384');
+    }
+    
+    const connected = await this.redis.connect();
+    if (connected) {
+      console.log('✅ Redis initialized successfully');
+      // Load existing users from Redis on startup
+      await this.loadUsersFromRedis();
+    } else {
+      console.warn('⚠️ Redis connection failed, running in memory-only mode');
+    }
+  }
+
+  async loadUsersFromRedis() {
+    try {
+      const users = await this.redis.getAllUsersWithLocations();
+      console.log(`📊 Loaded ${users.length} users from Redis`);
+      
+      // Add users to in-memory cache (but don't set connections)
+      users.forEach(user => {
+        this.users.set(user.name, user);
+      });
+    } catch (error) {
+      console.error('Error loading users from Redis:', error);
+    }
   }
 
   setupRoutes() {
@@ -35,7 +73,7 @@ class LocationServer {
       
       open: (ws) => {
         console.log('New WebSocket connection opened');
-        ws.userId = null; // Will be set when user sends location_update
+        ws.username = null; // Will be set when user sends location_update
         
         // Send connection acknowledgment
         this.sendMessage(ws, {
@@ -63,8 +101,8 @@ class LocationServer {
 
       close: (ws) => {
         console.log('WebSocket connection closed');
-        if (ws.userId) {
-          this.handleUserDisconnect(ws.userId);
+        if (ws.username) {
+          this.handleUserDisconnect(ws.username);
         }
       }
     });
@@ -76,6 +114,7 @@ class LocationServer {
         status: 'healthy',
         connectedUsers: this.users.size,
         serverId: this.serverId,
+        redis: this.redis.getConnectionStatus(),
         timestamp: new Date().toISOString()
       }));
     });
@@ -88,7 +127,10 @@ class LocationServer {
 
     switch (message.type) {
       case 'location_update':
-        this.handleLocationUpdate(ws, message.data);
+        this.handleLocationUpdate(ws, message.data).catch(error => {
+          console.error('Error handling location update:', error);
+          this.sendError(ws, 'LOCATION_UPDATE_ERROR', 'Failed to process location update', error.message);
+        });
         break;
       
       case 'user_disconnect':
@@ -96,7 +138,17 @@ class LocationServer {
         break;
       
       case 'get_users':
-        this.sendUsersList(ws);
+        this.sendUsersList(ws).catch(error => {
+          console.error('Error sending users list:', error);
+          this.sendError(ws, 'USERS_LIST_ERROR', 'Failed to retrieve users list', error.message);
+        });
+        break;
+      
+      case 'get_location_history':
+        this.handleLocationHistoryRequest(ws, message.data).catch(error => {
+          console.error('Error handling location history request:', error);
+          this.sendError(ws, 'HISTORY_REQUEST_ERROR', 'Failed to process location history request', error.message);
+        });
         break;
       
       default:
@@ -104,7 +156,7 @@ class LocationServer {
     }
   }
 
-  handleLocationUpdate(ws, data) {
+  async handleLocationUpdate(ws, data) {
     // Validate required fields
     const validation = this.validateLocationData(data);
     if (!validation.valid) {
@@ -112,87 +164,83 @@ class LocationServer {
     }
 
     // Check rate limiting
-    if (this.isRateLimited(data.id)) {
+    if (this.isRateLimited(data.name)) {
       return this.sendError(ws, 'RATE_LIMITED', 'Location updates too frequent', 
         `Minimum interval is ${this.config.locationUpdateInterval}ms`);
     }
 
     // Check user limit
-    if (!this.users.has(data.id) && this.users.size >= this.config.maxUsers) {
+    if (!this.users.has(data.name) && this.users.size >= this.config.maxUsers) {
       return this.sendError(ws, 'USER_LIMIT_EXCEEDED', 
         `Maximum ${this.config.maxUsers} users allowed`);
     }
 
     // Update rate limit tracker
-    this.userRateLimit.set(data.id, Date.now());
+    this.userRateLimit.set(data.name, Date.now());
 
     // Store/update user data
     const userData = {
-      id: data.id,
       name: data.name,
       latitude: data.latitude,
       longitude: data.longitude,
       lastUpdate: data.lastUpdate || new Date().toISOString()
     };
 
-    const isNewUser = !this.users.has(data.id);
-    this.users.set(data.id, userData);
-    this.connections.set(data.id, ws);
-    ws.userId = data.id;
+    const isNewUser = !this.users.has(data.name);
+    this.users.set(data.name, userData);
+    this.connections.set(data.name, ws);
+    ws.username = data.name;
+
+    // Store in Redis for persistence
+    await this.redis.storeUserLocation(data.name, userData);
 
     console.log(`${isNewUser ? 'New' : 'Updated'} user location:`, userData);
 
     // Broadcast to all other connected clients
-    this.broadcastToOthers(data.id, {
+    this.broadcastToOthers(data.name, {
       type: 'user_location',
       data: userData
     });
   }
 
   handleUserDisconnectRequest(ws, data) {
-    if (!data.id) {
-      return this.sendError(ws, 'INVALID_DISCONNECT', 'User ID required for disconnect');
+    if (!data.name) {
+      return this.sendError(ws, 'INVALID_DISCONNECT', 'Username required for disconnect');
     }
 
-    if (ws.userId === data.id) {
-      this.handleUserDisconnect(data.id);
+    if (ws.username === data.name) {
+      this.handleUserDisconnect(data.name);
       ws.close();
     } else {
       this.sendError(ws, 'UNAUTHORIZED_DISCONNECT', 'Can only disconnect your own session');
     }
   }
 
-  handleUserDisconnect(userId) {
-    const user = this.users.get(userId);
+  async handleUserDisconnect(username) {
+    const user = this.users.get(username);
     if (user) {
       console.log('User disconnected:', user);
       
-      // Remove from storage
-      this.users.delete(userId);
-      this.connections.delete(userId);
-      this.userRateLimit.delete(userId);
+      // Remove from in-memory storage
+      this.users.delete(username);
+      this.connections.delete(username);
+      this.userRateLimit.delete(username);
+
+      // Note: We don't remove from Redis on disconnect to maintain persistence
+      // The TTL will handle cleanup of old data
 
       // Notify all other clients
-      this.broadcastToAll({
-        type: 'user_disconnected',
-        data: {
-          id: userId,
-          name: user.name
-        }
-      });
+      // this.broadcastToAll({
+      //   type: 'user_disconnected',
+      //   data: {
+      //     name: user.name
+      //   }
+      // });
     }
   }
 
   validateLocationData(data) {
     // Check required fields
-    if (!data.id) {
-      return { valid: false, code: 'MISSING_ID', message: 'User ID is required' };
-    }
-
-    if (!isValidUUID(data.id)) {
-      return { valid: false, code: 'INVALID_ID', message: 'User ID must be a valid UUID' };
-    }
-
     if (!data.name || typeof data.name !== 'string') {
       return { valid: false, code: 'INVALID_NAME', message: 'Name is required and must be a string' };
     }
@@ -241,19 +289,65 @@ class LocationServer {
     return { valid: true };
   }
 
-  isRateLimited(userId) {
-    const lastUpdate = this.userRateLimit.get(userId);
+  isRateLimited(username) {
+    const lastUpdate = this.userRateLimit.get(username);
     if (!lastUpdate) return false;
     
     return (Date.now() - lastUpdate) < this.config.locationUpdateInterval;
   }
 
-  sendUsersList(ws) {
-    const usersList = Array.from(this.users.values());
-    this.sendMessage(ws, {
-      type: 'users_list',
-      data: usersList
-    });
+  async sendUsersList(ws) {
+    try {
+      // Get all users from Redis (including disconnected ones)
+      const allUsers = await this.redis.getAllUsersWithLocations();
+      
+      // Merge with in-memory users (connected ones)
+      const connectedUsers = Array.from(this.users.values());
+      const connectedUsernames = new Set(connectedUsers.map(u => u.name));
+      
+      // Add connection status to users
+      const usersWithStatus = allUsers.map(user => ({
+        ...user,
+        connected: connectedUsernames.has(user.name)
+      }));
+      
+      this.sendMessage(ws, {
+        type: 'users_list',
+        data: usersWithStatus
+      });
+    } catch (error) {
+      console.error('Error sending users list:', error);
+      // Fallback to in-memory users only
+      const usersList = Array.from(this.users.values());
+      this.sendMessage(ws, {
+        type: 'users_list',
+        data: usersList
+      });
+    }
+  }
+
+  async handleLocationHistoryRequest(ws, data) {
+    if (!data || !data.username) {
+      return this.sendError(ws, 'MISSING_USERNAME', 'Username is required for location history');
+    }
+
+    try {
+      const startTime = data.startTime ? new Date(data.startTime).getTime() : null;
+      const endTime = data.endTime ? new Date(data.endTime).getTime() : null;
+      
+      const history = await this.redis.getUserLocationHistory(data.username, startTime, endTime);
+      
+      this.sendMessage(ws, {
+        type: 'location_history',
+        data: {
+          username: data.username,
+          history: history
+        }
+      });
+    } catch (error) {
+      console.error('Error retrieving location history:', error);
+      this.sendError(ws, 'HISTORY_ERROR', 'Failed to retrieve location history', error.message);
+    }
   }
 
   sendMessage(ws, message) {
@@ -277,9 +371,9 @@ class LocationServer {
     });
   }
 
-  broadcastToOthers(excludeUserId, message) {
-    this.connections.forEach((ws, userId) => {
-      if (userId !== excludeUserId) {
+  broadcastToOthers(excludeUsername, message) {
+    this.connections.forEach((ws, username) => {
+      if (username !== excludeUsername) {
         this.sendMessage(ws, message);
       }
     });
@@ -293,25 +387,28 @@ class LocationServer {
 
   startCleanupTimer() {
     // Clean up stale user data every 30 seconds
-    setInterval(() => {
+    setInterval(async () => {
       const now = Date.now();
       const staleUsers = [];
 
-      this.users.forEach((user, userId) => {
+      this.users.forEach((user, username) => {
         const lastUpdate = new Date(user.lastUpdate).getTime();
         if (now - lastUpdate > this.config.userTimeout) {
-          staleUsers.push(userId);
+          staleUsers.push(username);
         }
       });
 
-      staleUsers.forEach(userId => {
-        console.log('Cleaning up stale user:', userId);
-        this.handleUserDisconnect(userId);
-      });
+      for (const username of staleUsers) {
+        console.log('Cleaning up stale user:', username);
+        await this.handleUserDisconnect(username);
+      }
 
       if (staleUsers.length > 0) {
         console.log(`Cleaned up ${staleUsers.length} stale user(s)`);
       }
+
+      // Clean up old Redis entries
+      await this.redis.cleanupOldEntries();
     }, 30000);
   }
 
@@ -343,7 +440,7 @@ class LocationServer {
   }
 
   // Graceful shutdown
-  shutdown() {
+  async shutdown() {
     console.log('🛑 Shutting down server...');
     
     // Notify all users about server shutdown
@@ -364,6 +461,9 @@ class LocationServer {
     this.users.clear();
     this.connections.clear();
     this.userRateLimit.clear();
+
+    // Close Redis connection
+    await this.redis.disconnect();
 
     console.log('✅ Server shutdown complete');
     process.exit(0);

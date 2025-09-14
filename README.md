@@ -6,6 +6,9 @@ A high-performance, real-time location sharing backend server built with [uWebSo
 
 - **Real-time Location Updates**: Share and receive location updates instantly via WebSocket
 - **User Management**: Automatic user presence tracking and disconnect notifications
+- **Redis Persistence**: Location data persisted with Redis using ZSET for time-based queries
+- **Location History**: Track user location history with timestamp-based retrieval
+- **Automatic Cleanup**: TTL-based cleanup of old location data
 - **Health Monitoring**: Built-in health check endpoint for monitoring
 - **High Performance**: Powered by uWebSockets.js for maximum efficiency
 - **Docker Ready**: Easy deployment with Docker and Docker Compose
@@ -23,6 +26,7 @@ This server works with the following client applications:
 ### Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/)
+- [Redis](https://redis.io/) server (included in Docker Compose)
 - (Optional) [Node.js 14+](https://nodejs.org/) for local development
 
 ### 1. Clone the Repository
@@ -32,20 +36,76 @@ git clone https://github.com/MyTracksLoc/live-location-share-server.git
 cd live-location-share-server
 ```
 
-### 2. Run with Docker
+### 2. Run with Docker Compose (Recommended)
 
 ```bash
-# Build and run the server
-docker build -t location-sharing-server .
-docker run -p 8083:8083 location-sharing-server
+# Start both the server and Redis
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+
+# Stop services
+docker-compose down
 ```
 
-### 3. Test the Server
+### 3. Run with Docker (Manual)
+
+```bash
+# Start Redis first
+docker run -d --name redis -p 6379:6379 redis:7-alpine
+
+# Build and run the server
+docker build -t location-sharing-server .
+docker run -p 8083:8083 --link redis:redis -e REDIS_HOST=redis location-sharing-server
+```
+
+### 4. Test the Server
 
 ```bash
 # Test with the included test client
 npm install
 npm test
+
+# Test Redis integration specifically
+node test-redis.js
+```
+
+## 🔧 Redis Configuration
+
+The server uses Redis for persistent storage of location data. Location data is stored using Redis ZSET (sorted set) with timestamps as scores, enabling efficient time-based queries.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REDIS_HOST` | `localhost` | Redis server hostname |
+| `REDIS_PORT` | `6379` | Redis server port |
+| `REDIS_PASSWORD` | `null` | Redis password (if required) |
+| `REDIS_DB` | `0` | Redis database number |
+
+### Data Storage
+
+- **Location Data**: Stored in ZSET with format `location_share:locations:{userId}`
+- **User Metadata**: Stored in HASH with format `location_share:user:{userId}`
+- **TTL**: Location data expires after 7 days, user metadata after 30 days
+- **Max Entries**: Only the latest 100 location entries per user are kept
+
+### Local Development
+
+```bash
+# Install dependencies
+npm install
+
+# Start Redis locally
+docker run -d --name redis -p 6379:6379 redis:7-alpine
+
+# Set environment variables
+export REDIS_HOST=localhost
+export REDIS_PORT=6379
+
+# Start the server
+npm start
 ```
 
 The server will be available at:
@@ -154,7 +214,21 @@ Request current connected users:
 }
 ```
 
-#### 3. User Disconnect
+#### 3. Get Location History
+Request location history for a user (with optional time range):
+
+```json
+{
+  "type": "get_location_history",
+  "data": {
+    "userId": "user-uuid-here",
+    "startTime": "2024-01-01T00:00:00.000Z",  // Optional
+    "endTime": "2024-01-01T23:59:59.999Z"     // Optional
+  }
+}
+```
+
+#### 4. User Disconnect
 Gracefully disconnect:
 
 ```json
@@ -192,9 +266,29 @@ Gracefully disconnect:
       "name": "User 1",
       "latitude": 37.7749,
       "longitude": -122.4194,
-      "lastUpdate": "2024-01-01T12:00:00.000Z"
+      "lastUpdate": "2024-01-01T12:00:00.000Z",
+      "connected": true
     }
   ]
+}
+```
+
+#### Location History
+```json
+{
+  "type": "location_history",
+  "data": {
+    "userId": "user-uuid-here",
+    "history": [
+      {
+        "id": "user-uuid-here",
+        "name": "User Name",
+        "latitude": 37.7749,
+        "longitude": -122.4194,
+        "lastUpdate": "2024-01-01T12:00:00.000Z"
+      }
+    ]
+  }
 }
 ```
 
